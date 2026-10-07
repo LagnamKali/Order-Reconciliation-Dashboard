@@ -100,7 +100,7 @@
     background: var(--panel);
     border-bottom: 1px solid var(--line);
   }
-  #drawer.open{ max-height: 620px; }
+  #drawer.open{ max-height: 85vh; overflow-y: auto; }
   .drawer-inner{ padding:18px 22px 22px; max-width:760px; margin:0 auto; }
   .drawer-inner h2{ font-size:13px; margin:0 0 4px; color:var(--text); }
   .drawer-inner p.hint{ font-size:12px; color:var(--text-dim); margin:0 0 16px; line-height:1.5; }
@@ -334,6 +334,11 @@
     intervalId: null,
     config: null,
   };
+
+  // Defensive: some browser extensions / corporate security tools disable
+  // buttons on local file:// pages after load. Force these back on just in case.
+  els.demoBtn.disabled = false;
+  els.connectBtn.disabled = false;
 
   // ---------- drawer toggle ----------
   els.settingsBtn.addEventListener('click', () => {
