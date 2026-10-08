@@ -293,23 +293,6 @@
       </label>
     </div>
     <div class="conn-msg" id="connMsg"></div>
-
-    <div class="divider"><span>or use offline data</span></div>
-
-    <h2>Upload Excel file(s) instead</h2>
-    <p class="hint">
-      No live connection needed — upload one or more exported .xlsx files (e.g. a SAP/WMS extract) and chat against
-      a frozen snapshot. Each sheet becomes a table the assistant can answer questions about. Nothing is uploaded
-      anywhere — the file is parsed entirely in your browser.
-    </p>
-    <div class="field full" style="margin-bottom:12px;">
-      <label>Excel file(s) (.xlsx)</label>
-      <input id="fExcel" type="file" accept=".xlsx,.xls" multiple />
-    </div>
-    <div class="drawer-actions">
-      <button class="btn-primary" id="excelBtn">Load Excel file(s)</button>
-    </div>
-    <div class="conn-msg" id="excelMsg"></div>
   </div>
 </div>
 
@@ -352,9 +335,6 @@
     fDataset: document.getElementById('fDataset'),
     fTables: document.getElementById('fTables'),
     fApiKey: document.getElementById('fApiKey'),
-    fExcel: document.getElementById('fExcel'),
-    excelBtn: document.getElementById('excelBtn'),
-    excelMsg: document.getElementById('excelMsg'),
     autoRefresh: document.getElementById('autoRefresh'),
     refreshSecs: document.getElementById('refreshSecs'),
   };
@@ -372,7 +352,6 @@
   // buttons on local file:// pages after load. Force these back on just in case.
   els.demoBtn.disabled = false;
   els.connectBtn.disabled = false;
-  els.excelBtn.disabled = false;
 
   // ---------- drawer toggle ----------
   els.settingsBtn.addEventListener('click', () => {
@@ -388,10 +367,7 @@
     els.connMsg.className = 'conn-msg show ' + kind;
     els.connMsg.textContent = text;
   }
-  function setExcelMsg(kind, text){
-    els.excelMsg.className = 'conn-msg show ' + kind;
-    els.excelMsg.textContent = text;
-  }
+
 
   function enableChat(){
     els.question.disabled = false;
@@ -537,59 +513,41 @@
     els.drawer.classList.remove('open');
   });
 
-  async function parseExcelFiles(files){
-    if(typeof XLSX === 'undefined'){
-      throw new Error('The Excel-reading library failed to load (no internet access to cdnjs.cloudflare.com?). Try again once you have a connection.');
-    }
-    const tables = {};
-    for(const file of files){
-      const buf = await file.arrayBuffer();
+  // Auto-load an Excel file from a URL baked into the Teams tab's contentUrl
+  // (?excelUrl=...), so people using the Teams tab get data with zero setup.
+  async function autoLoadExcelFromUrl(url){
+    try{
+      setStatus('idle', 'Loading offline data…');
+      const res = await fetch(url);
+      if(!res.ok) throw new Error(`HTTP ${res.status} fetching the file`);
+      const buf = await res.arrayBuffer();
+      if(typeof XLSX === 'undefined'){
+        throw new Error('The Excel-reading library failed to load (no internet access to cdnjs.cloudflare.com?).');
+      }
       const wb = XLSX.read(buf, { type: 'array', cellDates: true });
+      const tables = {};
       wb.SheetNames.forEach(sheetName => {
         const ws = wb.Sheets[sheetName];
         const rows = XLSX.utils.sheet_to_json(ws, { defval: null, raw: true });
-        if(!rows.length) return;
-        // Key by sheet name; if multiple files share a sheet name, disambiguate with the filename.
-        const key = tables[sheetName] ? `${sheetName} (${file.name})` : sheetName;
-        tables[key] = rows.slice(0, 500);
+        if(rows.length) tables[sheetName] = rows.slice(0, 500);
       });
-    }
-    return tables;
-  }
-
-  els.excelBtn.addEventListener('click', async () => {
-    const files = Array.from(els.fExcel.files || []);
-    if(files.length === 0){
-      setExcelMsg('bad', 'Choose at least one .xlsx file first.');
-      return;
-    }
-    els.excelBtn.textContent = 'Loading…';
-    els.excelBtn.disabled = true;
-    try{
-      const tables = await parseExcelFiles(files);
       const tableNames = Object.keys(tables);
-      if(tableNames.length === 0){
-        throw new Error('No data found — the sheet(s) may be empty or have no header row.');
-      }
-      if(state.intervalId){ clearInterval(state.intervalId); state.intervalId = null; }
+      if(tableNames.length === 0) throw new Error('No data found — the sheet(s) may be empty or have no header row.');
+
       state.demo = false;
       state.config = null;
       state.connected = true;
       state.liveData = tables;
       state.lastRefreshed = new Date();
-      setExcelMsg('ok', `Loaded ${tableNames.length} table(s) from ${files.length} file(s): ${tableNames.join(', ')}.`);
       setStatus('idle', `Offline · loaded ${state.lastRefreshed.toLocaleTimeString()}`);
       els.brandSub.textContent = `Offline Excel data · ${tableNames.length} table(s)`;
       enableChat();
-      addMessage('system', `Loaded offline data from ${files.map(f=>f.name).join(', ')}. Tracking: ${tableNames.join(', ')}. This is a static snapshot — it won't auto-refresh.`);
-      els.drawer.classList.remove('open');
+      addMessage('system', `Automatically loaded data from ${url.split('/').pop()}. Tracking: ${tableNames.join(', ')}. This is a static snapshot — it won't auto-refresh.`);
     }catch(err){
-      setExcelMsg('bad', `Could not load file(s): ${err.message}`);
-    }finally{
-      els.excelBtn.textContent = 'Load Excel file(s)';
-      els.excelBtn.disabled = false;
+      setStatus('err', 'Auto-load failed');
+      addMessage('system', `Couldn't auto-load the Excel file: ${err.message}. You can still connect to Power BI via \u2699 Connect, or try demo mode.`);
     }
-  });
+  }
 
   els.autoRefresh.addEventListener('change', () => { if(state.connected) startAutoRefresh(); });
   els.refreshSecs.addEventListener('change', () => { if(state.connected) startAutoRefresh(); });
@@ -921,6 +879,10 @@ QUESTION: ${question}`;
     els.question.style.height = 'auto';
     els.question.style.height = Math.min(120, els.question.scrollHeight) + 'px';
   });
+
+  // If the page was opened with ?excelUrl=... (set in the Teams tab's contentUrl), load it automatically.
+  const _excelUrl = new URLSearchParams(window.location.search).get('excelUrl');
+  if(_excelUrl) autoLoadExcelFromUrl(_excelUrl);
 
   // ---------- Microsoft Teams integration ----------
   // Only attempt this when actually embedded in a frame (e.g. a real Teams tab).
