@@ -4,6 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Order Reconciliation Dashboard (SAP to WMS)</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <style>
   body.theme-light{
     --bg:#f5f6f8; --panel:#ffffff; --panel-2:#eef0f4; --line:#dde1e8;
@@ -138,6 +139,12 @@
   .conn-msg.show{ display:block; }
   .conn-msg.ok{ background: rgba(63,201,176,.12); color: var(--teal); border:1px solid rgba(63,201,176,.3); }
   .conn-msg.bad{ background: rgba(229,72,77,.1); color:#ff8b8f; border:1px solid rgba(229,72,77,.3); }
+  .divider{ display:flex; align-items:center; gap:10px; margin:22px 0 16px; color:var(--text-dim); font-size:11.5px; text-transform:uppercase; letter-spacing:.04em; }
+  .divider::before, .divider::after{ content:''; flex:1; height:1px; background:var(--line); }
+  input[type="file"]{
+    background: var(--bg); border:1px solid var(--line); color:var(--text-dim);
+    padding:8px 10px; border-radius:7px; font-size:12.5px; font-family: var(--sans);
+  }
 
   /* ---------- chat ---------- */
   main{
@@ -241,8 +248,14 @@
       leaves your browser and nothing is saved anywhere. Don't have a token handy? Use <b>Demo mode</b> below to try
       the chat with sample data first.
     </p>
+    <p class="hint">
+      Chat works instantly with no API key at all — a built-in rule-based engine answers counts, sums, averages,
+      filters, and "top/bottom N" questions directly from the loaded data, for free, fully offline. Adding a Claude
+      API key below is optional — it upgrades answers to handle more open-ended, free-form phrasing, at a small
+      per-question cost.
+    </p>
     <p class="hint" style="color:#ff8b8f;">
-      About the API key below: it's sent directly to Anthropic from your browser and nowhere else, but anyone with
+      If you do add a key: it's sent directly to Anthropic from your browser and nowhere else, but anyone with
       access to this page (view-source, devtools) can read it while it's filled in — fine for testing on your own
       machine, but don't put a real key in a page others will open (a hosted URL, a Teams tab). For that, route the
       chat call through a small backend that holds the key server-side instead — ask if you'd like that scaffolded.
@@ -266,7 +279,7 @@
       </div>
     </div>
     <div class="field full" style="margin-bottom:12px;">
-      <label>Claude API key — required when running this file outside Claude.ai (local file, hosted page, Teams tab)</label>
+      <label>Claude API key (optional) — only needed for more flexible, free-form question understanding</label>
       <input id="fApiKey" type="password" placeholder="sk-ant-api03-..." autocomplete="off" />
     </div>
     <div class="drawer-actions">
@@ -280,6 +293,23 @@
       </label>
     </div>
     <div class="conn-msg" id="connMsg"></div>
+
+    <div class="divider"><span>or use offline data</span></div>
+
+    <h2>Upload Excel file(s) instead</h2>
+    <p class="hint">
+      No live connection needed — upload one or more exported .xlsx files (e.g. a SAP/WMS extract) and chat against
+      a frozen snapshot. Each sheet becomes a table the assistant can answer questions about. Nothing is uploaded
+      anywhere — the file is parsed entirely in your browser.
+    </p>
+    <div class="field full" style="margin-bottom:12px;">
+      <label>Excel file(s) (.xlsx)</label>
+      <input id="fExcel" type="file" accept=".xlsx,.xls" multiple />
+    </div>
+    <div class="drawer-actions">
+      <button class="btn-primary" id="excelBtn">Load Excel file(s)</button>
+    </div>
+    <div class="conn-msg" id="excelMsg"></div>
   </div>
 </div>
 
@@ -288,7 +318,7 @@
     <div class="empty-state" id="emptyState">
       <div class="bolt-big">⚡</div>
       <h3>Connect a dataset to start</h3>
-      <p>Once connected, ask things like "how many orders are out of sync between SAP and WMS right now" or "which exceptions are oldest" — answers are grounded in the latest data pulled from Power BI.</p>
+      <p>Once connected — live via Power BI, or an offline Excel upload — ask things like "how many orders are out of sync between SAP and WMS right now" or "which exceptions are oldest" and get answers grounded in the actual data.</p>
     </div>
   </div>
 
@@ -322,6 +352,9 @@
     fDataset: document.getElementById('fDataset'),
     fTables: document.getElementById('fTables'),
     fApiKey: document.getElementById('fApiKey'),
+    fExcel: document.getElementById('fExcel'),
+    excelBtn: document.getElementById('excelBtn'),
+    excelMsg: document.getElementById('excelMsg'),
     autoRefresh: document.getElementById('autoRefresh'),
     refreshSecs: document.getElementById('refreshSecs'),
   };
@@ -339,6 +372,7 @@
   // buttons on local file:// pages after load. Force these back on just in case.
   els.demoBtn.disabled = false;
   els.connectBtn.disabled = false;
+  els.excelBtn.disabled = false;
 
   // ---------- drawer toggle ----------
   els.settingsBtn.addEventListener('click', () => {
@@ -354,11 +388,18 @@
     els.connMsg.className = 'conn-msg show ' + kind;
     els.connMsg.textContent = text;
   }
+  function setExcelMsg(kind, text){
+    els.excelMsg.className = 'conn-msg show ' + kind;
+    els.excelMsg.textContent = text;
+  }
 
   function enableChat(){
     els.question.disabled = false;
     els.send.disabled = false;
-    els.composerHint.textContent = 'Answers are grounded in the data pulled at the last refresh.';
+    const apiKeySet = els.fApiKey.value.trim();
+    els.composerHint.textContent = apiKeySet
+      ? 'Using Claude for free-form answers, grounded in the data pulled at the last refresh.'
+      : 'Using the built-in query engine (no API key) — try counts, sums, averages, filters, and "top N" questions.';
     els.emptyState.style.display = 'none';
   }
 
@@ -496,6 +537,60 @@
     els.drawer.classList.remove('open');
   });
 
+  async function parseExcelFiles(files){
+    if(typeof XLSX === 'undefined'){
+      throw new Error('The Excel-reading library failed to load (no internet access to cdnjs.cloudflare.com?). Try again once you have a connection.');
+    }
+    const tables = {};
+    for(const file of files){
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf, { type: 'array', cellDates: true });
+      wb.SheetNames.forEach(sheetName => {
+        const ws = wb.Sheets[sheetName];
+        const rows = XLSX.utils.sheet_to_json(ws, { defval: null, raw: true });
+        if(!rows.length) return;
+        // Key by sheet name; if multiple files share a sheet name, disambiguate with the filename.
+        const key = tables[sheetName] ? `${sheetName} (${file.name})` : sheetName;
+        tables[key] = rows.slice(0, 500);
+      });
+    }
+    return tables;
+  }
+
+  els.excelBtn.addEventListener('click', async () => {
+    const files = Array.from(els.fExcel.files || []);
+    if(files.length === 0){
+      setExcelMsg('bad', 'Choose at least one .xlsx file first.');
+      return;
+    }
+    els.excelBtn.textContent = 'Loading…';
+    els.excelBtn.disabled = true;
+    try{
+      const tables = await parseExcelFiles(files);
+      const tableNames = Object.keys(tables);
+      if(tableNames.length === 0){
+        throw new Error('No data found — the sheet(s) may be empty or have no header row.');
+      }
+      if(state.intervalId){ clearInterval(state.intervalId); state.intervalId = null; }
+      state.demo = false;
+      state.config = null;
+      state.connected = true;
+      state.liveData = tables;
+      state.lastRefreshed = new Date();
+      setExcelMsg('ok', `Loaded ${tableNames.length} table(s) from ${files.length} file(s): ${tableNames.join(', ')}.`);
+      setStatus('idle', `Offline · loaded ${state.lastRefreshed.toLocaleTimeString()}`);
+      els.brandSub.textContent = `Offline Excel data · ${tableNames.length} table(s)`;
+      enableChat();
+      addMessage('system', `Loaded offline data from ${files.map(f=>f.name).join(', ')}. Tracking: ${tableNames.join(', ')}. This is a static snapshot — it won't auto-refresh.`);
+      els.drawer.classList.remove('open');
+    }catch(err){
+      setExcelMsg('bad', `Could not load file(s): ${err.message}`);
+    }finally{
+      els.excelBtn.textContent = 'Load Excel file(s)';
+      els.excelBtn.disabled = false;
+    }
+  });
+
   els.autoRefresh.addEventListener('change', () => { if(state.connected) startAutoRefresh(); });
   els.refreshSecs.addEventListener('change', () => { if(state.connected) startAutoRefresh(); });
 
@@ -517,6 +612,219 @@
 
   function escapeHtml(s){
     return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  // ---------- local rule-based query engine (no API key needed) ----------
+  function norm(s){ return String(s).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(); }
+
+  // Best-effort expansion of common SAP/BI abbreviations so natural-language words
+  // (e.g. "modified") can match a terse column name (e.g. "MODDTE").
+  function expandLabel(label){
+    let l = label;
+    if(/dte$/.test(l) || /\bdte\b/.test(l)) l += ' date';
+    if(/^mod/.test(l)) l += ' modified updated changed';
+    if(/^add/.test(l)) l += ' added created new';
+    if(/\bqty\b/.test(l)) l += ' quantity';
+    if(/\bamt\b/.test(l)) l += ' amount';
+    if(/\bdesc\b/.test(l)) l += ' description';
+    if(/\bwh\b/.test(l)) l += ' warehouse';
+    if(/\bnbr\b|\bno\b/.test(l)) l += ' number';
+    return l;
+  }
+
+  function buildColumnIndex(){
+    const index = {};
+    for(const [table, rows] of Object.entries(state.liveData)){
+      if(!rows.length) continue;
+      const keys = Object.keys(rows[0]);
+      index[table] = keys.map(key => {
+        const rawLabel = key.includes('[') ? key.split('[').pop().replace(']', '') : key;
+        // split camelCase (AgeHours -> Age Hours) and snake_case before lowercasing, so each
+        // word is matchable independently.
+        const label = rawLabel.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/_/g, ' ').toLowerCase().trim();
+        const values = rows.map(r => r[key]).filter(v => v !== null && v !== undefined && v !== '');
+        const dateObjCount = values.filter(v => v instanceof Date).length;
+        const numericCount = values.filter(v => !(v instanceof Date) && v !== '' && !isNaN(parseFloat(v)) && isFinite(v)).length;
+        const isNumeric = values.length > 0 && dateObjCount === 0 && numericCount / values.length > 0.8;
+        // Native Date parsing is dangerously lenient (e.g. new Date("SO-10203") "succeeds"),
+        // so require a recognizable date pattern before trusting it, not just a non-NaN parse.
+        const DATE_PATTERN = /\d{4}-\d{1,2}-\d{1,2}|\d{1,2}\/\d{1,2}\/\d{2,4}|\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b/i;
+        const textDateCount = values.filter(v => !(v instanceof Date) && !isNumeric && DATE_PATTERN.test(String(v)) && !isNaN(new Date(v).getTime())).length;
+        const isDate = values.length > 0 && (dateObjCount / values.length > 0.8 || (!isNumeric && textDateCount / values.length > 0.8));
+        const distinctSet = [...new Set(values.map(v => v instanceof Date ? v.toISOString() : String(v)))];
+        const isCategorical = !isDate && distinctSet.length > 0 && distinctSet.length <= 50;
+        return {
+          key, label, searchLabel: expandLabel(label),
+          isNumeric, isDate, isCategorical,
+          distinctValues: isCategorical ? distinctSet : []
+        };
+      });
+    }
+    return index;
+  }
+
+  function pickTable(qNorm, index){
+    const tableNames = Object.keys(index);
+    if(tableNames.length <= 1) return tableNames[0];
+    for(const t of tableNames){ if(qNorm.includes(norm(t))) return t; }
+    let best = tableNames[0], bestScore = -1;
+    for(const t of tableNames){
+      let score = 0;
+      // word-level match on the table name itself (splits camelCase/snake_case, e.g.
+      // "ReconciliationExceptions" -> "reconciliation exceptions"), so "exceptions" alone matches.
+      const nameWords = t.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/_/g, ' ').toLowerCase().split(' ').filter(w => w.length > 3);
+      nameWords.forEach(w => { if(qNorm.includes(w)) score += 3; });
+      index[t].forEach(col => {
+        if(col.label.length > 2 && qNorm.includes(col.label)) score += 2;
+        col.distinctValues.forEach(v => { if(norm(v).length >= 2 && qNorm.includes(norm(v))) score += 1; });
+      });
+      if(score > bestScore){ bestScore = score; best = t; }
+    }
+    return best;
+  }
+
+  function detectFilters(qNorm, colsMeta){
+    const candidates = [];
+    colsMeta.forEach(col => {
+      if(!col.isCategorical) return;
+      col.distinctValues.forEach(v => {
+        const nv = norm(v);
+        if(nv.length >= 2) candidates.push({ col, value: v, nv });
+      });
+    });
+    candidates.sort((a, b) => b.nv.length - a.nv.length);
+    const used = new Set();
+    const filters = [];
+    for(const c of candidates){
+      if(used.has(c.col.key)) continue;
+      if(qNorm.includes(c.nv)){
+        filters.push({ key: c.col.key, label: c.col.label, value: c.value });
+        used.add(c.col.key);
+      }
+    }
+    return filters;
+  }
+
+  function findBestColumn(qNorm, colsMeta, predicate){
+    let best = null, bestScore = 0;
+    colsMeta.filter(predicate).forEach(col => {
+      const words = col.searchLabel.split(' ').filter(w => w.length > 2);
+      let score = 0;
+      words.forEach(w => { if(qNorm.includes(w)) score++; });
+      if(score > bestScore){ bestScore = score; best = col; }
+    });
+    return bestScore > 0 ? best : null;
+  }
+
+  function detectGroupBy(qNorm, colsMeta){
+    const m = qNorm.match(/\bby ([a-z0-9 ]+)/);
+    if(m){
+      const phrase = m[1];
+      let best = null, bestScore = 0;
+      colsMeta.forEach(col => {
+        if(!col.isCategorical) return;
+        let score = 0;
+        col.searchLabel.split(' ').filter(w => w.length > 2).forEach(w => { if(phrase.includes(w)) score++; });
+        if(score > bestScore){ bestScore = score; best = col; }
+      });
+      if(best) return best;
+    }
+    if(/breakdown|group by|per /.test(qNorm)) return findBestColumn(qNorm, colsMeta, c => c.isCategorical);
+    return null;
+  }
+
+  function detectIntent(qNorm){
+    if(/\bhow many\b|\bnumber of\b|\bcount of\b|\brows? (are|is) there\b/.test(qNorm)) return 'COUNT';
+    if(/\b(sum|total)\b/.test(qNorm)) return 'SUM';
+    if(/\b(average|avg|mean)\b/.test(qNorm)) return 'AVG';
+    if(/\b(highest|max|most|largest|top|newest|latest|recent)\b/.test(qNorm)) return 'MAX';
+    if(/\b(lowest|min|least|smallest|oldest|earliest)\b/.test(qNorm)) return 'MIN';
+    if(/\b(list|show|which|what are|display)\b/.test(qNorm)) return 'LIST';
+    return 'COUNT';
+  }
+
+  function formatRows(rows, colsMeta, mustIncludeKeys){
+    if(!rows.length) return '(no matching rows)';
+    const preferred = ['id', 'number', 'name', 'status', 'date', 'delivery', 'order'];
+    let keys = colsMeta.filter(c => preferred.some(p => c.label.includes(p))).map(c => c.key);
+    if(keys.length === 0) keys = colsMeta.slice(0, 5).map(c => c.key);
+    (mustIncludeKeys || []).forEach(k => { if(!keys.includes(k)) keys.unshift(k); });
+    keys = keys.slice(0, 6);
+    const labelOf = k => (colsMeta.find(c => c.key === k) || {}).label || k;
+    return rows.map(r => keys.map(k => `${labelOf(k)}=${r[k]}`).join(', ')).join('\n');
+  }
+
+  function answerLocally(question){
+    const index = buildColumnIndex();
+    const tableNames = Object.keys(index);
+    if(tableNames.length === 0) return "No data is loaded yet — connect a dataset, use demo mode, or upload an Excel file first.";
+
+    const qNorm = norm(question);
+    const table = pickTable(qNorm, index);
+    const colsMeta = index[table];
+    const rows = state.liveData[table] || [];
+    const filters = detectFilters(qNorm, colsMeta);
+    const groupCol = detectGroupBy(qNorm, colsMeta);
+    const intent = detectIntent(qNorm);
+
+    let filtered = rows;
+    filters.forEach(f => { filtered = filtered.filter(r => String(r[f.key]) === String(f.value)); });
+
+    const filterDesc = filters.length ? ' where ' + filters.map(f => `${f.label} = "${f.value}"`).join(' and ') : '';
+    const interp = `[${table}${filterDesc}]`;
+
+    if(groupCol && (intent === 'COUNT' || intent === 'SUM' || intent === 'AVG')){
+      const groups = {};
+      filtered.forEach(r => {
+        const g = r[groupCol.key] ?? '(blank)';
+        (groups[g] = groups[g] || []).push(r);
+      });
+      const aggCol = intent !== 'COUNT' ? findBestColumn(qNorm, colsMeta, c => c.isNumeric && c.key !== groupCol.key) : null;
+      const lines = Object.entries(groups).map(([g, rs]) => {
+        if(intent === 'COUNT') return [g, rs.length];
+        if(!aggCol) return [g, null];
+        const vals = rs.map(r => parseFloat(r[aggCol.key])).filter(v => !isNaN(v));
+        const val = intent === 'SUM' ? vals.reduce((a, b) => a + b, 0) : vals.reduce((a, b) => a + b, 0) / (vals.length || 1);
+        return [g, val];
+      }).filter(([, v]) => v !== null)
+        .sort((a, b) => b[1] - a[1]);
+      if(lines.length === 0) return `${interp} — couldn't find a numeric column to ${intent.toLowerCase()}. Try naming it explicitly, e.g. "total QtyOrdered by region".`;
+      const body = lines.map(([g, v]) => `${g}: ${v.toLocaleString(undefined, { maximumFractionDigits: 2 })}`).join('\n');
+      return `${interp} grouped by ${groupCol.label}:\n${body}`;
+    }
+
+    if(intent === 'SUM' || intent === 'AVG'){
+      const aggCol = findBestColumn(qNorm, colsMeta, c => c.isNumeric);
+      if(!aggCol) return `${interp} — found ${filtered.length} matching row(s), but couldn't identify which numeric column to ${intent.toLowerCase()}. Try naming it explicitly, e.g. "total Revenue".`;
+      const vals = filtered.map(r => parseFloat(r[aggCol.key])).filter(v => !isNaN(v));
+      const val = intent === 'SUM' ? vals.reduce((a, b) => a + b, 0) : vals.reduce((a, b) => a + b, 0) / (vals.length || 1);
+      return `${interp}: ${intent === 'SUM' ? 'total' : 'average'} ${aggCol.label} = ${val.toLocaleString(undefined, { maximumFractionDigits: 2 })} (across ${filtered.length} row(s))`;
+    }
+
+    if(intent === 'MAX' || intent === 'MIN'){
+      const sortCol = findBestColumn(qNorm, colsMeta, c => c.isDate)
+        || findBestColumn(qNorm, colsMeta, c => c.isNumeric)
+        || colsMeta.find(c => c.isDate) || colsMeta.find(c => c.isNumeric);
+      if(!sortCol) return `${interp} — found ${filtered.length} matching row(s), but couldn't tell which column to sort by.`;
+      // "Age"-style numeric columns (AgeHours, DaysOpen, etc.) are inverted relative to real
+      // dates: a bigger number means further in the past, so "oldest" means MAX here, not MIN.
+      const isAgeLike = !sortCol.isDate && /\bage\b|\bdays?\b/.test(sortCol.label);
+      const effectiveIntent = isAgeLike ? (intent === 'MIN' ? 'MAX' : 'MIN') : intent;
+      const sorted = [...filtered].sort((a, b) => {
+        const av = sortCol.isDate ? new Date(a[sortCol.key]).getTime() : parseFloat(a[sortCol.key]);
+        const bv = sortCol.isDate ? new Date(b[sortCol.key]).getTime() : parseFloat(b[sortCol.key]);
+        return effectiveIntent === 'MAX' ? bv - av : av - bv;
+      });
+      const label = intent === 'MAX' ? 'highest/most recent first' : 'lowest/oldest first';
+      return `${interp} sorted by ${sortCol.label} (${label}), top 5:\n${formatRows(sorted.slice(0, 5), colsMeta, [sortCol.key])}`;
+    }
+
+    if(intent === 'LIST'){
+      const shown = filtered.slice(0, 15);
+      return `${interp} — ${filtered.length} matching row(s)${filtered.length > 15 ? ', showing first 15' : ''}:\n${formatRows(shown, colsMeta)}`;
+    }
+
+    return `${interp}: ${filtered.length} row(s).`;
   }
 
   function summarizeDataForModel(){
@@ -586,10 +894,11 @@ QUESTION: ${question}`;
     els.question.style.height = 'auto';
     els.send.disabled = true;
     addMessage('user', q);
-    const thinking = addMessage('bot', 'Reading the latest data…');
+    const apiKey = els.fApiKey.value.trim();
+    const thinking = addMessage('bot', apiKey ? 'Reading the latest data…' : 'Checking the data…');
     thinking.querySelector('.bubble').classList.add('thinking');
     try{
-      const answer = await askModel(q);
+      const answer = apiKey ? await askModel(q) : answerLocally(q);
       thinking.querySelector('.bubble').classList.remove('thinking');
       thinking.querySelector('.bubble').textContent = answer;
     }catch(err){
